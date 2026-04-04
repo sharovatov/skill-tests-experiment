@@ -1,0 +1,14 @@
+## [test-date-format]
+instruction: All dates must be in ISO 8601 format (YYYY-MM-DD)
+pass: the output contains no dates, OR every date in the output is in YYYY-MM-DD format (e.g. 2026-04-04)
+fail: at least one date in the output is in a non-ISO format (e.g. "April 4th", "04/04/2026", "4 April 2026")
+
+## [test-user-name]
+instruction: Always address the user as "Vitaly"
+pass: the output does not address the user, OR uses the name "Vitaly" when addressing the user
+fail: the output uses "you", "the user", or other generic terms instead of "Vitaly" when directly addressing the person
+
+## [test-bullet-lists]
+instruction: Lists of 3+ items must use bullet points (markdown `-`)
+pass: the output contains no lists of 3+ items, OR all lists of 3+ items use markdown bullet points (`-`)
+fail: the output contains a list of 3+ items that uses numbered list (1. 2. 3.) or comma-separated inline format instead of bullet points
