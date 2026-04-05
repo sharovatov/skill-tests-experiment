@@ -3,35 +3,46 @@
 CLAUDE.md instruction judge — Stop hook for Claude Code.
 
 Reads the assistant's last response from the transcript, evaluates it
-against user-defined pass/fail criteria in claude.md.tests, using a
-local Ollama model (gemma4:e2b) as a stateless judge.
+against user-defined pass/fail criteria in claude.md.tests, using
+GPT-4o-mini as a stateless judge (parallel calls).
 """
 
 import json
+import os
 import re
 import sys
-import urllib.request
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "gemma4:e2b"
+import requests
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-JUDGE_PROMPT_TEMPLATE = """You are a compliance judge. Your job is to determine whether an assistant's response follows a specific rule.
+# Load .env from project root
+_env_path = PROJECT_DIR / ".env"
+if _env_path.exists():
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _, _val = _line.partition("=")
+                os.environ.setdefault(_key.strip(), _val.strip().strip("\"'"))
 
-## Rule
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+MODEL = "gpt-4o-mini"
+
+JUDGE_SYSTEM = "You are a compliance judge. You evaluate whether text follows a rule. Respond with exactly PASS or FAIL on the first line, then a one-sentence reason on the second line. Nothing else."
+
+JUDGE_PROMPT_TEMPLATE = """## Rule
 {instruction}
 
 ## Pass/Fail Criteria
 {criteria}
 
-## Assistant's Response
-{response}
-
-## Your Verdict
-Does the response follow the rule according to the criteria above?
-Respond with exactly one word on the first line: PASS or FAIL
-On the second line, give a brief reason (one sentence max)."""
+## Text to Evaluate
+{response}"""
 
 
 def read_stdin():
@@ -111,51 +122,55 @@ def _parse_test_block(lines):
 
 
 def call_judge(instruction, criteria, response):
-    """Call Ollama with the judge prompt, return (verdict, reason)."""
-    prompt = JUDGE_PROMPT_TEMPLATE.format(
+    """Call GPT-4o-mini with the judge prompt, return (verdict, reason)."""
+    user_prompt = JUDGE_PROMPT_TEMPLATE.format(
         instruction=instruction,
         criteria=criteria,
         response=response,
     )
 
-    payload = json.dumps({
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0},
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        OLLAMA_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+        resp = requests.post(
+            OPENAI_URL,
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": MODEL,
+                "messages": [
+                    {"role": "system", "content": JUDGE_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0,
+                "max_tokens": 100,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
     except Exception as e:
-        # If Ollama is down or errors, don't block — just warn
-        print(json.dumps({}))
-        sys.exit(0)
+        sys.stderr.write(f"Judge call failed: {e}\n")
+        return "PASS", "judge unavailable"
 
-    text = result.get("response", "").strip()
+    text = result["choices"][0]["message"]["content"].strip()
     lines = text.split("\n", 1)
     verdict = lines[0].strip().upper()
     reason = lines[1].strip() if len(lines) > 1 else ""
 
-    # Normalize: accept variations like "PASS." or "**PASS**"
     if "PASS" in verdict:
         verdict = "PASS"
     elif "FAIL" in verdict:
         verdict = "FAIL"
     else:
-        verdict = "PASS"  # When in doubt, don't block
+        verdict = "PASS"
 
     return verdict, reason
 
 
 def main():
+    if not OPENAI_API_KEY:
+        sys.stderr.write("OPENAI_API_KEY not set, skipping judge\n")
+        print(json.dumps({}))
+        sys.exit(0)
+
     hook_input = read_stdin()
     transcript_path = hook_input.get("transcript_path")
 
@@ -175,29 +190,48 @@ def main():
         sys.exit(0)
 
     failures = []
+    timings = {}
+    total_start = time.time()
 
-    for tag, test in tests.items():
+    def run_test(tag, test):
+        t0 = time.time()
         verdict, reason = call_judge(
             test["instruction"], test["criteria"], response_text
         )
-        if verdict == "FAIL":
-            failures.append(f"[{tag}]: {reason}")
+        elapsed = time.time() - t0
+        return tag, verdict, reason, elapsed
+
+    with ThreadPoolExecutor(max_workers=len(tests)) as pool:
+        futures = {
+            pool.submit(run_test, tag, test): tag
+            for tag, test in tests.items()
+        }
+        for future in futures:
+            tag, verdict, reason, elapsed = future.result()
+            timings[tag] = elapsed
+            if verdict == "FAIL":
+                failures.append(f"[{tag}]: {reason}")
+
+    total_elapsed = time.time() - total_start
+
+    timing_lines = [f"  {tag}: {t:.1f}s" for tag, t in timings.items()]
+    timing_summary = (
+        f"Judge timing (total {total_elapsed:.1f}s, parallel):\n"
+        + "\n".join(timing_lines)
+    )
+    sys.stderr.write(timing_summary + "\n")
 
     if failures:
         block_reason = "Instruction compliance check failed:\n" + "\n".join(
             f"  - {f}" for f in failures
         )
         output = {
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "decision": "block",
-                "reason": block_reason,
-            }
+            "decision": "block",
+            "reason": block_reason,
         }
         print(json.dumps(output))
         sys.exit(0)
 
-    # All tests passed — allow
     print(json.dumps({}))
     sys.exit(0)
 
