@@ -12,7 +12,11 @@ Rules live in plain Markdown, judging runs locally as a hook, and there's no ext
 
 ## Why
 
-`CLAUDE.md` lets you give Claude project-specific instructions, but nothing enforces them. Claude can drift, forget, or reinterpret rules. This repo is a minimal harness for measuring and enforcing compliance: write the rule once in `CLAUDE.md`, write its pass/fail criteria once in `claude.md.tests`, and every assistant turn gets graded automatically.
+`CLAUDE.md` lets you give Claude project-specific instructions, but nothing enforces them. Claude can drift, forget, or reinterpret rules. This repo is a minimal harness for fixing that — but the value compounds in three directions:
+
+- **Enforcement.** Write the rule once in `CLAUDE.md`, write its pass/fail criteria once in `claude.md.tests`, and every assistant turn gets graded automatically. Failed turns are blocked and Claude retries with the failure reason in hand.
+- **A benchmark seed.** Every `claude.md.tests` entry is already a labeled eval — instruction, pass/fail criteria, model verdict. Run the same suite against different base models, different `CLAUDE.md` phrasings, or different judge models, and the harness stops being a guard and starts being a measurement instrument. The artifact written incidentally while authoring project rules turns into an internal instruction-following benchmark.
+- **An instruction-design discipline.** Writing the `pass:` and `fail:` lines is a forcing function. "All dates must be in ISO format" sounds crisp until the test asks *what counts as a date* — does "2026" count? "Q2"? "yesterday"? Until that's pinned down, the rule isn't a rule, it's a vibe. TDD-for-prompts: the test sharpens the instruction before the instruction ever runs.
 
 ## How it works
 
